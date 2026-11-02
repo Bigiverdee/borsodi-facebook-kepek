@@ -4,7 +4,7 @@ import io
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, File, UploadFile
 from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pydantic import BaseModel
@@ -69,3 +69,14 @@ def compose(body: ComposeRequest, x_api_key: str | None = Header(default=None)):
     out = io.BytesIO()
     result.convert("RGB").save(out, format="PNG", optimize=True)
     return Response(content=out.getvalue(), media_type="image/png")
+
+
+@app.post("/compose-file")
+async def compose_file(image: UploadFile = File(...), x_api_key: str | None = Header(default=None)):
+    import hmac
+    if not API_KEY or not x_api_key or not hmac.compare_digest(x_api_key, API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    raw = await image.read(12_000_001)
+    if len(raw) > 12_000_000:
+        raise HTTPException(status_code=413, detail="Image too large")
+    return compose(ComposeRequest(image_base64=base64.b64encode(raw).decode("ascii")), x_api_key)
