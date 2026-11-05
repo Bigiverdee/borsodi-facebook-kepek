@@ -7,45 +7,98 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 app = FastAPI(title="Wekerle Borsod Facebook Image Composer")
 WIDTH, HEIGHT = 1080, 1350
-IMAGE_HEIGHT = 1000
 API_KEY = os.environ.get("IMAGE_API_KEY", "")
 THEMES = {
-    "blue_gold": ("#102E5D", "#E6BA61", "#FFFFFF"),
-    "blue_white": ("#164B8B", "#D9EBFA", "#FFFFFF"),
-    "green_terracotta": ("#234A3C", "#D18B69", "#FFFFFF"),
-    "purple_cream": ("#45335F", "#E9D6B1", "#FFFFFF"),
-    "sage_green": ("#3C5E50", "#BBD3B6", "#FFFFFF"),
+    "blue_gold": ("#102E5D", "#E6BA61"),
+    "blue_white": ("#164B8B", "#C5E7FF"),
+    "green_terracotta": ("#234A3C", "#ECB096"),
+    "purple_cream": ("#45335F", "#F2D5A2"),
+    "sage_green": ("#3C5E50", "#D4E6BE"),
 }
 BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 def font(size, bold=False):
-    path = BOLD if bold else REGULAR
     try:
-        return ImageFont.truetype(path, size)
+        return ImageFont.truetype(BOLD if bold else REGULAR, size)
     except OSError:
         return ImageFont.load_default()
 
-def fit_text(draw, value, max_width, preferred, minimum=24, bold=False):
-    text = " ".join((value or "").split())[:180]
-    for size in range(preferred, minimum - 1, -2):
-        f = font(size, bold)
-        if draw.textbbox((0, 0), text, font=f)[2] <= max_width:
-            return text, f
-    words = text.split()
-    while words and draw.textbbox((0, 0), " ".join(words) + "…", font=font(minimum, bold))[2] > max_width:
-        words.pop()
-    return " ".join(words) + ("…" if words else ""), font(minimum, bold)
+def fit_lines(draw, raw, max_width=960, max_lines=2, start=78, minimum=37):
+    words = " ".join((raw or "").split())[:140].split()
+    for sz in range(start, minimum - 1, -2):
+        face = font(sz, True)
+        lines, current = [], ""
+        for word in words:
+            candidate = (current + " " + word).strip()
+            if draw.textbbox((0, 0), candidate, font=face)[2] <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        if len(lines) <= max_lines and all(draw.textbbox((0, 0), l, font=face)[2] <= max_width for l in lines):
+            return lines, face, sz
+    return ["WEKERLE+ FELÚJÍTÁS"], font(60, True), 60
+
+def fit_single(draw, raw, max_width, start=38, minimum=24):
+    words = " ".join((raw or "").split())[:170]
+    for sz in range(start, minimum-1, -2):
+        face = font(sz)
+        if draw.textbbox((0, 0), words, font=face)[2] <= max_width:
+            return words, face
+    face = font(minimum)
+    while words and draw.textbbox((0, 0), words + "…", font=face)[2] > max_width:
+        words = words[:-1].rstrip()
+    return words + "…", face
+
+def compose_image(raw, headline, subheadline, theme):
+    bg, accent = THEMES[theme]
+    with Image.open(io.BytesIO(raw)) as original:
+        original.load()
+        photo = ImageOps.fit(ImageOps.exif_transpose(original).convert("RGB"), (WIDTH, HEIGHT),
+                             method=Image.Resampling.LANCZOS, centering=(0.5, 0.47))
+    out = photo.convert("RGBA")
+    # Transparent gradient rather than an opaque lower panel.
+    gradient = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    pixels = gradient.load()
+    rgb = tuple(bytes.fromhex(bg.lstrip("#")))
+    for y in range(610, HEIGHT):
+        t = (y - 610) / (HEIGHT - 610)
+        alpha = int(220 * (t ** 0.75))
+        for x in range(WIDTH):
+            pixels[x, y] = (*rgb, alpha)
+    out = Image.alpha_composite(out, gradient)
+    d = ImageDraw.Draw(out)
+    # Distinct but compact floating campaign badge.
+    d.rounded_rectangle((48, 52, 426, 124), radius=19, fill=bg)
+    d.rounded_rectangle((48, 52, 57, 124), radius=4, fill=accent)
+    d.text((79, 70), "WEKERLE+  |  BORSOD", font=font(30, True), fill="#FFFFFF")
+    lines, headline_font, sz = fit_lines(d, headline)
+    top = 955 if len(lines) == 1 else 880
+    for line in lines:
+        d.text((49, top), line, font=headline_font, fill="#FFFFFF",
+               stroke_width=2, stroke_fill=(0, 0, 0, 85))
+        top += sz + 19
+    subtitle, sub_font = fit_single(d, subheadline, 975)
+    d.text((51, top + 10), subtitle, font=sub_font, fill="#FFFFFF")
+    d.rounded_rectangle((48, 1192, 622, 1272), radius=16, fill=accent)
+    d.text((70, 1215), "JELENTKEZÉS  •  wekerleborsod.hu", font=font(26, True), fill=bg)
+    d.text((50, 1304), "FLO INVEST Kft.  |  Nem hivatalos pályázati oldal", font=font(20),
+           fill="#FFFFFF")
+    return out.convert("RGB")
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "wekerle-facebook-kepek", "themes": list(THEMES)}
+    return {"ok": True, "service": "wekerle-facebook-kepek", "design": "full_bleed_v2", "themes": list(THEMES)}
 
 @app.post("/compose-file")
 async def compose_file(
     image: UploadFile = File(...),
-    headline: str = Form("WEKERLE+ FELÚJÍTÁS"),
-    subheadline: str = Form("Érdeklődjön a lehetőségekről Borsodban!"),
+    headline: str = Form("Korszerűbb otthon Borsodban"),
+    subheadline: str = Form("Előzetes érdeklődés a felújítási lehetőségekről"),
     theme: str = Form("blue_gold"),
     x_api_key: str | None = Header(default=None),
 ):
@@ -58,28 +111,9 @@ async def compose_file(
         raise HTTPException(status_code=413, detail="Image too large")
     try:
         Image.MAX_IMAGE_PIXELS = 22_000_000
-        with Image.open(io.BytesIO(raw)) as original:
-            original.load()
-            photo = ImageOps.fit(ImageOps.exif_transpose(original).convert("RGB"), (WIDTH, IMAGE_HEIGHT), method=Image.Resampling.LANCZOS)
+        result = compose_image(raw, headline, subheadline, theme)
     except (OSError, ValueError, Image.DecompressionBombError):
         raise HTTPException(status_code=400, detail="Invalid image")
-
-    bg, accent, white = THEMES[theme]
-    out = Image.new("RGB", (WIDTH, HEIGHT), bg)
-    out.paste(photo, (0, 0))
-    d = ImageDraw.Draw(out)
-    d.rectangle((0, IMAGE_HEIGHT, WIDTH, IMAGE_HEIGHT + 12), fill=accent)
-    d.rectangle((0, IMAGE_HEIGHT + 12, 16, HEIGHT), fill=accent)
-    d.rounded_rectangle((48, IMAGE_HEIGHT + 34, 340, IMAGE_HEIGHT + 84), radius=18, fill=accent)
-    d.text((66, IMAGE_HEIGHT + 43), "WEKERLE+  •  BORSOD", fill=bg, font=font(23, True))
-    title, title_font = fit_text(d, headline, 970, 61, 28, True)
-    d.text((48, IMAGE_HEIGHT + 103), title, fill=white, font=title_font)
-    subtitle, sub_font = fit_text(d, subheadline, 970, 33, 22, False)
-    d.text((50, IMAGE_HEIGHT + 195), subtitle, fill=white, font=sub_font)
-    d.line((50, HEIGHT - 71, WIDTH - 50, HEIGHT - 71), fill=accent, width=2)
-    d.text((50, HEIGHT - 57), "wekerleborsod.hu", fill=accent, font=font(33, True))
-    d.text((WIDTH - 355, HEIGHT - 51), "FLO INVEST Kft.", fill=white, font=font(23, False))
-
     buf = io.BytesIO()
-    out.save(buf, format="PNG", optimize=True)
+    result.save(buf, format="PNG", optimize=True)
     return Response(content=buf.getvalue(), media_type="image/png")
